@@ -1,0 +1,22 @@
+# Secret keys — NEVER upload these
+.env
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs — optional, remove if you want to show threat history
+logs/
+
+# HuggingFace model cache
+*.bin
+*.safetensors
