@@ -16,11 +16,6 @@ from litellm import completion
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# ── Import all three gates ─────────────────────────────────
-from gates.gate1_pii import scan_pii
-from gates.gate2_semantic import scan_semantics
-from gates.gate3_output import scan_output
-
 # ── Page configuration ─────────────────────────────────────
 st.set_page_config(
     page_title="Sentinel-AI",
@@ -52,8 +47,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Initialize session state ───────────────────────────────
-# Session state keeps data alive between interactions
-# Without this counters reset every time user types
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "total_scanned" not in st.session_state:
@@ -62,18 +55,25 @@ if "total_blocked" not in st.session_state:
     st.session_state.total_blocked = 0
 if "last_threat" not in st.session_state:
     st.session_state.last_threat = "None detected yet"
-if "gate1_status" not in st.session_state:
-    st.session_state.gate1_status = "✅ Active"
-if "gate2_status" not in st.session_state:
-    st.session_state.gate2_status = "✅ Active"
-if "gate3_status" not in st.session_state:
-    st.session_state.gate3_status = "✅ Active"
+if "gates_loaded" not in st.session_state:
+    st.session_state.gates_loaded = False
+
+
+# ── Load all three gates ONCE on first message ─────────────
+# Using st.cache_resource means models load once and stay
+# in memory. Loading on first message instead of startup
+# prevents HuggingFace free tier from timing out.
+@st.cache_resource(show_spinner="🛡️ Loading security gates... this takes 2-3 minutes on first load")
+def load_gates():
+    from gates.gate1_pii import scan_pii
+    from gates.gate2_semantic import scan_semantics
+    from gates.gate3_output import scan_output
+    return scan_pii, scan_semantics, scan_output
 
 
 def call_llm(prompt: str) -> str:
     """
     Sends cleaned prompt to Llama 3 via LiteLLM + Groq.
-    Returns the LLM response as a string.
 
     Args:
         prompt (str): The cleaned safe prompt
@@ -103,6 +103,9 @@ def run_pipeline(user_prompt: str) -> dict:
     Returns:
         dict: Results from all gates and final response
     """
+
+    # ── Load gates on first call ───────────────────────────
+    scan_pii, scan_semantics, scan_output = load_gates()
 
     results = {
         "original_prompt": user_prompt,
@@ -189,19 +192,15 @@ with st.sidebar:
     st.divider()
 
     # ── Threat Log Viewer ──────────────────────────────────
-    # ── Threat Log Viewer ──────────────────────────────────
     try:
         with open("logs/threats.json", "r") as f:
             threats = json.load(f)
 
         if threats:
-            # ── All Time Statistics ────────────────────────
             st.subheader("📈 All Time Statistics")
 
-            # Count total threats
             total_threats = len(threats)
 
-            # Count each threat type
             threat_types = {}
             for t in threats:
                 threat_type = t["threat_type"]
@@ -209,7 +208,6 @@ with st.sidebar:
                     threat_types.get(threat_type, 0) + 1
                 )
 
-            # Find most common attack type
             most_common = max(
                 threat_types,
                 key=threat_types.get
@@ -219,13 +217,11 @@ with st.sidebar:
                 most_common_count / total_threats * 100
             )
 
-            # Show total threats metric
             st.metric(
                 label="Total Threats Logged",
                 value=total_threats
             )
 
-            # Show most common attack
             st.info(
                 f"**Most Common Attack:**\n\n"
                 f"{most_common}\n\n"
@@ -233,7 +229,6 @@ with st.sidebar:
                 f"({most_common_pct:.0f}%)"
             )
 
-            # Show breakdown of all threat types
             st.subheader("🎯 Attack Breakdown")
             for threat_type, count in sorted(
                 threat_types.items(),
@@ -249,7 +244,6 @@ with st.sidebar:
 
             st.divider()
 
-            # ── Recent Threats ─────────────────────────────
             st.subheader("📋 Recent Threats")
             for threat in reversed(threats[-5:]):
                 st.warning(
@@ -285,24 +279,19 @@ for message in st.session_state.messages:
 # ── Chat input ─────────────────────────────────────────────
 if prompt := st.chat_input("Type your prompt here..."):
 
-    # Show user message immediately
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append(
         {"role": "user", "content": prompt}
     )
 
-    # ── Run the full security pipeline ────────────────────
     with st.spinner("🔍 Scanning through security gates..."):
         results = run_pipeline(prompt)
 
-    # ── Update session counters ────────────────────────────
     st.session_state.total_scanned += 1
 
-    # ── Display results based on pipeline outcome ──────────
     with st.chat_message("assistant"):
 
-        # ── Show Gate 1 results if PII was found ──────────
         if results["pii_found"]:
             st.warning(
                 f"🟡 **Gate 1 — PII Detected & Cleaned**\n\n"
@@ -310,7 +299,6 @@ if prompt := st.chat_input("Type your prompt here..."):
                 f"Cleaned prompt sent to next gate."
             )
 
-        # ── BLOCKED by Gate 2 ──────────────────────────────
         if results["final_status"] == "blocked_injection":
             st.session_state.total_blocked += 1
             st.session_state.last_threat = (
@@ -326,7 +314,6 @@ if prompt := st.chat_input("Type your prompt here..."):
             )
             response_text = "⛔ Prompt blocked by security firewall."
 
-        # ── BLOCKED by Gate 3 ──────────────────────────────
         elif results["final_status"] == "blocked_output":
             st.session_state.total_blocked += 1
             if results["gate3_leaked"]:
@@ -343,7 +330,6 @@ if prompt := st.chat_input("Type your prompt here..."):
             )
             response_text = "⛔ Response blocked by security firewall."
 
-        # ── SAFE — deliver response ────────────────────────
         else:
             st.success(
                 f"🟢 **All Gates Passed**\n\n"
@@ -352,7 +338,6 @@ if prompt := st.chat_input("Type your prompt here..."):
             response_text = results["llm_response"]
             st.markdown(response_text)
 
-        # Save response to chat history
         st.session_state.messages.append(
             {"role": "assistant", "content": response_text}
         )
